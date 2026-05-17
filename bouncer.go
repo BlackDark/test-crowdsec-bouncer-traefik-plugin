@@ -66,6 +66,7 @@ const (
 var (
 	isCrowdsecStreamStartup = true
 	isCrowdsecStreamHealthy = true
+	lapiStreamConnected     = true
 	updateFailure           int64
 	streamTicker            chan bool
 	metricsTicker           chan bool
@@ -487,13 +488,20 @@ func (bouncer *Bouncer) handleNextServeHTTP(rw http.ResponseWriter, req *http.Re
 
 func handleStreamTicker(bouncer *Bouncer) {
 	if err := handleStreamCache(bouncer); err != nil {
-		bouncer.log.Warn(fmt.Sprintf("handleStreamTicker updateFailure:%d isCrowdsecStreamHealthy:%t %s", updateFailure, isCrowdsecStreamHealthy, err.Error()))
+		if lapiStreamConnected {
+			bouncer.log.Error("CrowdSec LAPI unreachable; stream cache not updated")
+			lapiStreamConnected = false
+		}
 		if bouncer.updateMaxFailure != -1 && updateFailure >= bouncer.updateMaxFailure && isCrowdsecStreamHealthy {
 			isCrowdsecStreamHealthy = false
-			bouncer.log.Error(fmt.Sprintf("handleStreamTicker:error updateFailure:%d %s", updateFailure, err.Error()))
+			bouncer.log.Error(fmt.Sprintf("CrowdSec stream sync failed %d times; blocking cache misses", updateFailure+1))
 		}
 		updateFailure++
 	} else {
+		if !lapiStreamConnected {
+			bouncer.log.Info("CrowdSec LAPI connection restored; stream cache refreshed")
+			lapiStreamConnected = true
+		}
 		isCrowdsecStreamHealthy = true
 		updateFailure = 0
 	}
