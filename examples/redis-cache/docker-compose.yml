@@ -1,0 +1,112 @@
+services:
+  traefik:
+    image: "traefik:v3.0.0"
+    container_name: "traefik"
+    restart: unless-stopped
+    command:
+      # - "--log.level=DEBUG"
+      - "--accesslog"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+
+      - "--experimental.plugins.bouncer.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin"
+      - "--experimental.plugins.bouncer.version=v1.3.0"
+      # - "--experimental.localplugins.bouncer.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs-redis:/var/log/traefik
+      # - ./../../:/plugins-local/src/github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+    ports:
+      - 80:80
+      - 8080:8080
+    depends_on:
+      - crowdsec
+      # - redis-insecure
+      - redis-secure
+
+# Either use secure, or insecure but do not mix both
+  # whoami-redis-insecure:
+  #   image: traefik/whoami
+  #   container_name: "simple-service-foo"
+  #   restart: unless-stopped
+  #   labels:
+  #     - "traefik.enable=true"
+  #     # Definition of the router
+  #     - "traefik.http.routers.router-foo.rule=Path(`/redis-insecure`)"
+  #     - "traefik.http.routers.router-foo.entrypoints=web"
+  #     - "traefik.http.routers.router-foo.middlewares=crowdsec@docker" 
+  #     # Definition of the service
+  #     - "traefik.http.services.service-foo.loadbalancer.server.port=80"
+  #     # Definition of the middleware
+  #     - "traefik.http.middlewares.crowdsec.plugin.bouncer.enabled=true"
+  #     - "traefik.http.middlewares.crowdsec.plugin.bouncer.crowdseclapikey=40796d93c2958f9e58345514e67740e5"
+  #     - "traefik.http.middlewares.crowdsec.plugin.bouncer.rediscacheenabled=true"
+  #     # Contact redis-unsecure without a password
+  #     - "traefik.http.middlewares.crowdsec.plugin.bouncer.rediscachehost=redis-insecure:6379"
+  #     - "traefik.http.middlewares.crowdsec.plugin.bouncer.loglevel=DEBUG"
+
+  whoami-redis-secure:
+    image: traefik/whoami
+    container_name: "simple-service-bar-redis"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      # Definition of the router
+      - "traefik.http.routers.router-bar.rule=Path(`/redis-secure`)"
+      - "traefik.http.routers.router-bar.entrypoints=web"
+      - "traefik.http.routers.router-bar.middlewares=crowdsec@docker" 
+      # Definition of the service
+      - "traefik.http.services.service-bar.loadbalancer.server.port=80"
+      # Definition of the middleware
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.enabled=true"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.crowdseclapikey=40796d93c2958f9e58345514e67740e5"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.rediscacheenabled=true"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.rediscachepassword=FIXME"
+      # Contact redis-secure with password
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.rediscachehost=redis-secure:6379"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.loglevel=DEBUG"
+
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.6.1-2
+    container_name: "crowdsec"
+    restart: unless-stopped
+    environment:
+      COLLECTIONS: crowdsecurity/traefik
+      CUSTOM_HOSTNAME: crowdsec
+      BOUNCER_KEY_TRAEFIK_DEV: 40796d93c2958f9e58345514e67740e5
+    volumes:
+      - ./acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - logs-redis:/var/log/traefik:ro
+      - crowdsec-db-redis:/var/lib/crowdsec/data/
+      - crowdsec-config-redis:/etc/crowdsec/
+    labels:
+      - "traefik.enable=false"
+
+  redis-secure:
+    image: "redis:7.0.12-alpine"
+    container_name: "redis-secure"
+    hostname: redis-secure
+    restart: unless-stopped
+    command: "redis-server --save 60 1 --loglevel debug --requirepass FIXME"
+    volumes:
+      - redis-secure-data:/data
+  
+  # redis-insecure:
+  #   image: "redis:7.0.12-alpine"
+  #   container_name: "redis-insecure"
+  #   hostname: redis-unsecure
+  #   restart: unless-stopped
+  #   command: "redis-server --save 60 1 --loglevel debug"
+  #   volumes:
+  #     - redis-unsecure-data:/data
+
+volumes:
+  logs-redis:
+  crowdsec-db-redis:
+  crowdsec-config-redis:
+  redis-unsecure-data:
+  redis-secure-data:

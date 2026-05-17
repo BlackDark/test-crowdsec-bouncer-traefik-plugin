@@ -1,0 +1,18 @@
+image:
+  tag: v3.0.0
+
+logs:
+  general:
+    level: DEBUG
+  access:
+    enabled: true
+    format: json
+    fields:
+      headers: 
+        defaultmode: keep
+
+experimental:
+  plugins:
+    bouncer:
+      moduleName: "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin"
+      version: "v1.3.0"

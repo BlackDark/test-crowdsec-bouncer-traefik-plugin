@@ -1,0 +1,100 @@
+services:
+  traefik:
+    image: "traefik:v3.5.0"
+    container_name: "traefik"
+    restart: unless-stopped
+    command:
+      - "--log.level=DEBUG"
+      - "--accesslog"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+
+      - "--experimental.localplugins.bouncer.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs-local:/var/log/traefik
+      - "./ban.html:/ban.html:ro"
+      - "./captcha.html:/captcha.html:ro"
+      - ./:/plugins-local/src/github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+    ports:
+      - 8000:80
+      - 8080:8080
+    depends_on:
+      - crowdsec
+
+  whoami-foo:
+    image: traefik/whoami
+    container_name: "simple-service-foo"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.router-foo.rule=PathPrefix(`/foo`)"
+      - "traefik.http.routers.router-foo.entrypoints=web"
+      - "traefik.http.routers.router-foo.middlewares=crowdsec@docker"
+      - "traefik.http.services.service-foo.loadbalancer.server.port=80"
+
+  bar:
+    image: traefik/whoami
+    container_name: "simple-service-bar"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.router-bar.rule=PathPrefix(`/bar`)"
+      - "traefik.http.routers.router-bar.entrypoints=web"
+      - "traefik.http.routers.router-bar.middlewares=crowdsec@docker"
+      - "traefik.http.services.service-bar.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.enabled=true"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.loglevel=DEBUG"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.metricsupdateintervalseconds=15"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.crowdsecappsecenabled=true"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.crowdsecmode=stream"
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.crowdseclapikey=40796d93c2958f9e58345514e67740e5="
+      - "traefik.http.middlewares.crowdsec.plugin.bouncer.ForwardedHeadersTrustedIPs=172.21.0.1/8"
+
+  bar2:
+    image: traefik/whoami
+    container_name: "simple-service-bar2"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.router-bar2.rule=PathPrefix(`/bar2`)"
+      - "traefik.http.routers.router-bar2.entrypoints=web"
+      - "traefik.http.routers.router-bar2.middlewares=crowdsec2@docker"
+      - "traefik.http.services.service-bar2.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.enabled=true"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.loglevel=DEBUG"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.crowdsecmode=stream"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.updateintervalseconds=10"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.updatemaxfailure=-1"
+      - "traefik.http.middlewares.crowdsec2.plugin.bouncer.crowdseclapikey=40796d93c2958f9e58345514e67740e5="
+  bar3:
+    image: traefik/whoami
+    container_name: "simple-service-bar3"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.router-bar3.rule=PathPrefix(`/bar3`)"
+      - "traefik.http.routers.router-bar3.entrypoints=web"
+      - "traefik.http.routers.router-bar3.middlewares=crowdsec2@docker"
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.6.8
+    container_name: "crowdsec"
+    restart: unless-stopped
+    environment:
+      COLLECTIONS: crowdsecurity/traefik crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules
+      CUSTOM_HOSTNAME: crowdsec
+      BOUNCER_KEY_TRAEFIK: 40796d93c2958f9e58345514e67740e5=
+    volumes:
+      - ./acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - logs-local:/var/log/traefik:ro
+      - crowdsec-db-local:/var/lib/crowdsec/data/
+      - crowdsec-config-local:/etc/crowdsec/
+    labels:
+      - "traefik.enable=false"
+volumes:
+  logs-local:
+  crowdsec-db-local:
+  crowdsec-config-local:
