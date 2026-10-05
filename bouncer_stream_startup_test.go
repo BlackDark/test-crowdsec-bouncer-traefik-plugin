@@ -41,6 +41,9 @@ func streamStartupConfig(host string, block bool) *configuration.Config {
 	cfg.CrowdsecLapiHost = host
 	cfg.CrowdsecLapiKey = "test-key"
 	cfg.MetricsUpdateIntervalSeconds = 0
+	// Far longer than any test, so a "served exactly N times" assertion measures
+	// the startup sync rather than a periodic tick.
+	cfg.UpdateIntervalSeconds = 3600
 	return cfg
 }
 

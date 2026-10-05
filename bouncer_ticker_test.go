@@ -46,6 +46,9 @@ func TestStartTickerContainsPanicAndKeepsTicking(t *testing.T) {
 		runs <- struct{}{}
 		panic("sync exploded")
 	}, false)
+	// Sending on stop blocks until the in-flight run is done, so a panic cannot
+	// leave the ticker running for the rest of the binary.
+	defer func() { stop <- true }()
 
 	// The panic must be contained: the ticker logs it and keeps going, so a
 	// later tick still runs work.
@@ -56,10 +59,44 @@ func TestStartTickerContainsPanicAndKeepsTicking(t *testing.T) {
 			t.Fatal("ticker stopped running work after a panic")
 		}
 	}
-	stop <- true
 
 	if !strings.Contains(logs.String(), "test_ticker:panic sync exploded") {
 		t.Errorf("panic value was not logged, got:\n%s", logs.String())
+	}
+}
+
+func TestStartTickerSerializesRuns(t *testing.T) {
+	log, _ := capturingLogger()
+	release := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	stop := startTicker("test", 1, log, func() {
+		entered <- struct{}{}
+		<-release
+	}, false)
+	var released sync.Once
+	releaseWork := func() { released.Do(func() { close(release) }) }
+	defer func() { releaseWork(); stop <- true }()
+
+	// Overlapping work is what let slow syncs pile up on the shared lease, so a
+	// tick arriving while a run is in flight must wait rather than start another.
+	waitForEntered(t, entered)
+	select {
+	case <-entered:
+		t.Fatal("a second run of work started while the first was still in flight")
+	case <-time.After(1500 * time.Millisecond):
+	}
+
+	// It must resume once the blocked run finishes, not wedge for good.
+	releaseWork()
+	waitForEntered(t, entered)
+}
+
+func waitForEntered(t *testing.T, entered <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ticker never ran work")
 	}
 }
 
@@ -131,13 +168,9 @@ func TestNew_PushesUsageMetricsAtStartup(t *testing.T) {
 	}))
 	t.Cleanup(lapi.Close)
 
-	cfg := CreateConfig()
-	cfg.Enabled = true
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), true)
+	// LiveMode keeps the stream ticker out of it; this test is about metrics.
 	cfg.CrowdsecMode = configuration.LiveMode
-	cfg.CrowdsecLapiScheme = configuration.HTTP
-	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
-	cfg.CrowdsecLapiKey = "test-key"
-	cfg.UpdateIntervalSeconds = 3600
 	cfg.MetricsUpdateIntervalSeconds = 3600
 
 	if _, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "metrics-startup"); err != nil {
@@ -166,19 +199,14 @@ func syncStreamCache(bouncer *Bouncer) {
 
 func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 	resetStreamState(t)
+	var requests atomic.Int64
 	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
 		rw.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(lapi.Close)
 
-	cfg := CreateConfig()
-	cfg.Enabled = true
-	cfg.CrowdsecMode = configuration.StreamMode
-	cfg.StreamStartupBlock = false
-	cfg.CrowdsecLapiScheme = configuration.HTTP
-	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
-	cfg.CrowdsecLapiKey = "test-key"
-	cfg.MetricsUpdateIntervalSeconds = 0
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
 
 	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "peer-cache")
 	if err != nil {
@@ -195,9 +223,17 @@ func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 
 	// Fail once so the LAPI is marked down, then let the next tick hit the lease
 	// left behind by that failed sync. No LAPI request happens on that tick, so
-	// it must not be reported as a recovery.
+	// it must not be reported as a recovery. New's own startup sync may already
+	// have hit the LAPI, so compare against a baseline.
+	baseline := requests.Load()
 	handleStreamTicker(bouncer)
+	if got := requests.Load() - baseline; got != 1 {
+		t.Fatalf("the first tick served %d LAPI requests, want 1", got)
+	}
 	handleStreamTicker(bouncer)
+	if got := requests.Load() - baseline; got != 1 {
+		t.Fatalf("the sync lease did not short-circuit the second tick: %d LAPI requests, want 1", got)
+	}
 	if !strings.Contains(logs.String(), "CrowdSec LAPI unreachable") {
 		t.Fatalf("LAPI down was not logged, got:\n%s", logs.String())
 	}
@@ -213,14 +249,7 @@ func TestHandleStreamTickerBlocksCacheMissesAfterMaxFailures(t *testing.T) {
 	}))
 	t.Cleanup(lapi.Close)
 
-	cfg := CreateConfig()
-	cfg.Enabled = true
-	cfg.CrowdsecMode = configuration.StreamMode
-	cfg.StreamStartupBlock = false
-	cfg.CrowdsecLapiScheme = configuration.HTTP
-	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
-	cfg.CrowdsecLapiKey = "test-key"
-	cfg.MetricsUpdateIntervalSeconds = 0
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
 	cfg.UpdateMaxFailure = 2
 
 	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "max-failures")
@@ -234,7 +263,6 @@ func TestHandleStreamTickerBlocksCacheMissesAfterMaxFailures(t *testing.T) {
 	resetStreamState(t)
 	log, logs := capturingLogger()
 	bouncer.log = log
-	bouncer.updateMaxFailure = cfg.UpdateMaxFailure
 
 	for range 3 {
 		syncStreamCache(bouncer)
