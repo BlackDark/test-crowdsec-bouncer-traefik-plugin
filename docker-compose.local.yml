@@ -12,13 +12,13 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
 
-      - "--experimental.localplugins.bouncer.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin"
+      - "--experimental.localplugins.bouncer.modulename=github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - logs-local:/var/log/traefik
       - "./ban.html:/ban.html:ro"
       - "./captcha.html:/captcha.html:ro"
-      - ./:/plugins-local/src/github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      - ./:/plugins-local/src/github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin
     ports:
       - 8000:80
       - 8080:8080

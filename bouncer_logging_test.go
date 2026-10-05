@@ -1,4 +1,4 @@
-package crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
+package test_crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration"
+	"github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration"
 )
 
 // getTestConfig returns a minimal valid configuration for testing.

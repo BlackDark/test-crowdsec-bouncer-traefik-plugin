@@ -10,8 +10,8 @@ import (
 	"strings"
 	"text/template"
 
-	cache "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/cache"
-	configuration "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration"
+	cache "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache"
+	configuration "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration"
 )
 
 // Client Captcha client.

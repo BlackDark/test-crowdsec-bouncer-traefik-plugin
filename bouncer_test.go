@@ -1,4 +1,4 @@
-package crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
+package test_crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
 
 import (
 	"context"
@@ -13,10 +13,10 @@ import (
 	"text/template"
 	"time"
 
-	cache "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/cache"
-	configuration "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration"
-	ip "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/ip"
-	logger "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/logger"
+	cache "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache"
+	configuration "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration"
+	ip "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/ip"
+	logger "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/logger"
 )
 
 func TestServeHTTP(t *testing.T) {

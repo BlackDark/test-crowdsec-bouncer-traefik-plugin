@@ -5,7 +5,7 @@ package cache
 import (
 	"testing"
 
-	logger "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/logger"
+	logger "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/logger"
 	simpleredis "github.com/maxlerebourg/simpleredis"
 )
 

@@ -25,4 +25,4 @@ providers:
 experimental:
   localPlugins:
     bouncer:
-      moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      moduleName: github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin

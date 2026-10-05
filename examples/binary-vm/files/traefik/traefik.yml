@@ -30,7 +30,7 @@ providers:
 experimental:
   plugins:
     bouncer:
-      moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      moduleName: github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin
       version: v1.1.6
 
 ################################################################

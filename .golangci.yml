@@ -29,11 +29,11 @@ linters-settings:
           - "!$test"
         allow:
           - $gostd
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/logger
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/ip
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/cache
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/captcha
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/logger
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/ip
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/captcha
           - github.com/leprosus/golang-ttl-map
           - github.com/maxlerebourg/simpleredis
       Test:
@@ -42,11 +42,11 @@ linters-settings:
         allow:
           - $gostd
           - github.com/maxlerebourg/simpleredis
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/logger
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/ip
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/cache
-          - github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/captcha
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/logger
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/ip
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache
+          - github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/captcha
 
 linters:
   enable-all: true

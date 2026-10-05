@@ -2,7 +2,7 @@ displayName: Crowdsec Bouncer Traefik Plugin
 type: middleware
 iconPath: .assets/icon.png
 
-import: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+import: github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin
 
 summary: Middleware plugin which forwards the request IP to local Crowdsec agent, which can be used to allow/deny the request  
 
