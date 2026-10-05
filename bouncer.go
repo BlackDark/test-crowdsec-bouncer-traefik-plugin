@@ -1,6 +1,6 @@
-// Package crowdsec_bouncer_traefik_plugin implements a middleware that communicates with crowdsec.
+// Package test_crowdsec_bouncer_traefik_plugin implements a middleware that communicates with crowdsec.
 // It can cache results in memory or using redis, or even ask crowdsec for every requests.
-package crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
+package test_crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
 
 import (
 	"bytes"
@@ -19,11 +19,11 @@ import (
 	"text/template"
 	"time"
 
-	cache "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/cache"
-	captcha "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/captcha"
-	configuration "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/configuration"
-	ip "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/ip"
-	logger "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/pkg/logger"
+	cache "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache"
+	captcha "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/captcha"
+	configuration "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration"
+	ip "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/ip"
+	logger "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/logger"
 )
 
 const (
@@ -68,6 +68,7 @@ const (
 var (
 	isCrowdsecStreamStartup = true
 	isCrowdsecStreamHealthy = true
+	lapiStreamConnected     = true
 	updateFailure           int64
 	streamTicker            chan bool
 	metricsTicker           chan bool
@@ -136,7 +137,7 @@ type AppSecResponse struct {
 
 // New creates the crowdsec bouncer plugin.
 //
-//nolint:nestif,gocyclo,gocognit,funlen,maintidx
+//nolint:gocyclo,gocognit,funlen,maintidx
 func New(_ context.Context, next http.Handler, config *configuration.Config, name string) (http.Handler, error) {
 	config.LogLevel = strings.ToUpper(config.LogLevel)
 	log := logger.NewWithFormat(config.LogLevel, config.LogFilePath, config.LogFormat)
@@ -320,21 +321,20 @@ func New(_ context.Context, next http.Handler, config *configuration.Config, nam
 		}
 		if config.StreamStartupBlock {
 			handleStreamTicker(bouncer)
-		} else {
-			go handleStreamTicker(bouncer)
 		}
+		// When not blocking, the ticker goroutine runs the first sync itself
+		// instead of racing a detached goroutine against the first tick.
 		streamTicker = startTicker("stream", config.UpdateIntervalSeconds, log, func() {
 			handleStreamTicker(bouncer)
-		})
+		}, !config.StreamStartupBlock)
 	}
 
 	// Start metrics ticker if not already running
 	if metricsTicker == nil && config.MetricsUpdateIntervalSeconds > 0 {
 		lastMetricsPush = time.Now() // Initialize lastMetricsPush when starting the metrics ticker
-		go handleMetricsTicker(bouncer)
 		metricsTicker = startTicker("metrics", config.MetricsUpdateIntervalSeconds, log, func() {
 			handleMetricsTicker(bouncer)
-		})
+		}, false)
 	}
 
 	bouncer.log.Debug("New initialized mode:" + config.CrowdsecMode)
@@ -545,13 +545,22 @@ func (bouncer *Bouncer) handleAppsecResponseServeHTTP(rw http.ResponseWriter, re
 
 func handleStreamTicker(bouncer *Bouncer) {
 	if err := handleStreamCache(bouncer); err != nil {
-		bouncer.log.Warn(fmt.Sprintf("handleStreamTicker updateFailure:%d isCrowdsecStreamHealthy:%t %s", updateFailure, isCrowdsecStreamHealthy, err.Error()))
+		// Log only on transitions: a downed LAPI otherwise repeats the same
+		// message on every tick for as long as it stays unreachable.
+		if lapiStreamConnected {
+			bouncer.log.Error("CrowdSec LAPI unreachable; stream cache not updated")
+			lapiStreamConnected = false
+		}
 		if bouncer.updateMaxFailure != -1 && updateFailure >= bouncer.updateMaxFailure && isCrowdsecStreamHealthy {
 			isCrowdsecStreamHealthy = false
-			bouncer.log.Error(fmt.Sprintf("handleStreamTicker:error updateFailure:%d %s", updateFailure, err.Error()))
+			bouncer.log.Error(fmt.Sprintf("CrowdSec stream sync failed %d times; blocking cache misses", updateFailure+1))
 		}
 		updateFailure++
 	} else {
+		if !lapiStreamConnected {
+			bouncer.log.Info("CrowdSec LAPI connection restored; stream cache refreshed")
+			lapiStreamConnected = true
+		}
 		isCrowdsecStreamHealthy = true
 		updateFailure = 0
 	}
@@ -563,15 +572,31 @@ func handleMetricsTicker(bouncer *Bouncer) {
 	}
 }
 
-func startTicker(name string, updateInterval int64, log *slog.Logger, work func()) chan bool {
+// startTicker runs work every updateInterval seconds until stop is signaled.
+// work runs inline on the ticker goroutine and a panic in it is contained, so a
+// failing sync cannot kill the ticker or leak a goroutine per tick. When
+// noStartupDelay is set the first run happens immediately instead of after one
+// full interval.
+func startTicker(name string, updateInterval int64, log *slog.Logger, work func(), noStartupDelay bool) chan bool {
 	ticker := time.NewTicker(time.Duration(updateInterval) * time.Second)
 	stop := make(chan bool, 1)
 	go func() {
 		defer log.Debug(name + "_ticker:stopped")
+		run := func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Error(fmt.Sprintf("%s_ticker:panic %v", name, recovered))
+				}
+			}()
+			work()
+		}
+		if noStartupDelay {
+			run()
+		}
 		for {
 			select {
 			case <-ticker.C:
-				go work()
+				run()
 			case <-stop:
 				return
 			}
