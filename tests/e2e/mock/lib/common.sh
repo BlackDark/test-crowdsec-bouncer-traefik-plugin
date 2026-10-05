@@ -27,6 +27,8 @@ LAPI_KEY="${LAPI_KEY:-e2e-mock-key}"
 MOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$MOCK_LIB_DIR/../../../.." && pwd)"
 CACHE_DIR="$MOCK_LIB_DIR/../.cache"
+# Read from go.mod so the localPlugins path cannot drift from the module path.
+PLUGIN_MODULE="$(awk '/^module /{print $2; exit}' "$REPO_ROOT/go.mod")"
 
 # Populated by start_stack / run_scenario, consumed by the EXIT trap.
 WORKDIR=""
@@ -178,8 +180,9 @@ start_stack() {
 
   WORKDIR="$(mktemp -d)"
   # Expose the plugin source where Traefik's localPlugins loader expects it.
-  mkdir -p "$WORKDIR/plugins-local/src/github.com/maxlerebourg"
-  ln -s "$REPO_ROOT" "$WORKDIR/plugins-local/src/github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin"
+  PLUGIN_LINK="$WORKDIR/plugins-local/src/$PLUGIN_MODULE"
+  mkdir -p "$(dirname "$PLUGIN_LINK")"
+  ln -s "$REPO_ROOT" "$PLUGIN_LINK"
 
   cp "$MOCK_LIB_DIR/traefik.yml" "$WORKDIR/traefik.yml"
 

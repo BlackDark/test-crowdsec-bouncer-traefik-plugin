@@ -553,7 +553,7 @@ The following declaration (given here in YAML) defines a plugin:
 experimental:
   plugins:
     bouncer:
-      moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      moduleName: github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin
       version: vX.Y.Z # To update
 ```
 
@@ -830,8 +830,8 @@ The source code of the plugin should be organized as follows:
 ./plugins-local/
     └── src
         └── github.com
-            └── maxlerebourg
-                └── crowdsec-bouncer-traefik-plugin
+            └── BlackDark
+                └── test-crowdsec-bouncer-traefik-plugin
                     ├── bouncer.go
                     ├── bouncer_test.go
                     ├── go.mod

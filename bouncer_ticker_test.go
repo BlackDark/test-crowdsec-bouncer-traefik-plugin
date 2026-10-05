@@ -58,8 +58,8 @@ func TestStartTickerContainsPanicAndKeepsTicking(t *testing.T) {
 	}
 	stop <- true
 
-	if !strings.Contains(logs.String(), "test_ticker:panic") {
-		t.Errorf("panic was not logged, got:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "test_ticker:panic sync exploded") {
+		t.Errorf("panic value was not logged, got:\n%s", logs.String())
 	}
 }
 
@@ -73,6 +73,7 @@ func TestHandleStreamTickerLogsLAPIStateTransitionsOnly(t *testing.T) {
 		_, _ = rw.Write([]byte(`{"new":[],"deleted":[]}`))
 	}))
 	t.Cleanup(lapi.Close)
+	resetStreamState(t)
 
 	cfg := CreateConfig()
 	cfg.Enabled = true
@@ -80,6 +81,7 @@ func TestHandleStreamTickerLogsLAPIStateTransitionsOnly(t *testing.T) {
 	cfg.CrowdsecLapiScheme = configuration.HTTP
 	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
 	cfg.CrowdsecLapiKey = "test-key"
+	cfg.MetricsUpdateIntervalSeconds = 0
 
 	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "lapi-transitions")
 	if err != nil {
@@ -89,34 +91,160 @@ func TestHandleStreamTickerLogsLAPIStateTransitionsOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("New() returned %T, want *Bouncer", handler)
 	}
-	stopStreamTicker(t)
+	resetStreamState(t)
 	// New already performed a successful startup sync; assert on what follows.
 	// No global is written from here: handleStreamTicker owns them, and the only
 	// writer at runtime is the single stream ticker goroutine.
 	log, logs := capturingLogger()
 	bouncer.log = log
-	bouncer.cacheClient.Delete(cacheTimeoutKey)
 
 	unreachable.Store(true)
 	for range 3 {
-		handleStreamTicker(bouncer)
+		syncStreamCache(bouncer)
 	}
 	if down := strings.Count(logs.String(), "CrowdSec LAPI unreachable"); down != 1 {
 		t.Errorf("LAPI down logged %d times over 3 failed syncs, want 1:\n%s", down, logs.String())
 	}
 
 	unreachable.Store(false)
-	bouncer.cacheClient.Delete(cacheTimeoutKey)
-	handleStreamTicker(bouncer)
+	syncStreamCache(bouncer)
 	if !strings.Contains(logs.String(), "CrowdSec LAPI connection restored") {
 		t.Errorf("recovery was not logged, got:\n%s", logs.String())
 	}
 
 	// Going down again must re-arm the transition log.
 	unreachable.Store(true)
-	bouncer.cacheClient.Delete(cacheTimeoutKey)
-	handleStreamTicker(bouncer)
+	syncStreamCache(bouncer)
 	if down := strings.Count(logs.String(), "CrowdSec LAPI unreachable"); down != 2 {
 		t.Errorf("LAPI down logged %d times over two outages, want 2:\n%s", down, logs.String())
+	}
+}
+
+func TestNew_PushesUsageMetricsAtStartup(t *testing.T) {
+	resetStreamState(t)
+	var pushed atomic.Int64
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if strings.Contains(req.URL.Path, "/v1/usage-metrics") {
+			pushed.Add(1)
+		}
+		rw.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := CreateConfig()
+	cfg.Enabled = true
+	cfg.CrowdsecMode = configuration.LiveMode
+	cfg.CrowdsecLapiScheme = configuration.HTTP
+	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
+	cfg.CrowdsecLapiKey = "test-key"
+	cfg.UpdateIntervalSeconds = 3600
+	cfg.MetricsUpdateIntervalSeconds = 3600
+
+	if _, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "metrics-startup"); err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	resetStreamState(t)
+
+	// Otherwise the first usage report is delayed by a whole
+	// metricsUpdateIntervalSeconds, which defaults to 10 minutes.
+	deadline := time.Now().Add(5 * time.Second)
+	for pushed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := pushed.Load(); got != 1 {
+		t.Errorf("usage metrics pushed %d times at startup, want exactly 1", got)
+	}
+}
+
+// syncStreamCache runs one ticker tick with the shared-cache lease cleared, so
+// the sync really queries the LAPI instead of short-circuiting on a peer's
+// refresh.
+func syncStreamCache(bouncer *Bouncer) {
+	bouncer.cacheClient.Delete(cacheTimeoutKey)
+	handleStreamTicker(bouncer)
+}
+
+func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
+	resetStreamState(t)
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := CreateConfig()
+	cfg.Enabled = true
+	cfg.CrowdsecMode = configuration.StreamMode
+	cfg.StreamStartupBlock = false
+	cfg.CrowdsecLapiScheme = configuration.HTTP
+	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
+	cfg.CrowdsecLapiKey = "test-key"
+	cfg.MetricsUpdateIntervalSeconds = 0
+
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "peer-cache")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	log, logs := capturingLogger()
+	bouncer.log = log
+	bouncer.cacheClient.Delete(cacheTimeoutKey)
+
+	// Fail once so the LAPI is marked down, then let the next tick hit the lease
+	// left behind by that failed sync. No LAPI request happens on that tick, so
+	// it must not be reported as a recovery.
+	handleStreamTicker(bouncer)
+	handleStreamTicker(bouncer)
+	if !strings.Contains(logs.String(), "CrowdSec LAPI unreachable") {
+		t.Fatalf("LAPI down was not logged, got:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "CrowdSec LAPI connection restored") {
+		t.Errorf("a peer cache refresh was reported as an LAPI recovery:\n%s", logs.String())
+	}
+}
+
+func TestHandleStreamTickerBlocksCacheMissesAfterMaxFailures(t *testing.T) {
+	resetStreamState(t)
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := CreateConfig()
+	cfg.Enabled = true
+	cfg.CrowdsecMode = configuration.StreamMode
+	cfg.StreamStartupBlock = false
+	cfg.CrowdsecLapiScheme = configuration.HTTP
+	cfg.CrowdsecLapiHost = strings.TrimPrefix(lapi.URL, "http://")
+	cfg.CrowdsecLapiKey = "test-key"
+	cfg.MetricsUpdateIntervalSeconds = 0
+	cfg.UpdateMaxFailure = 2
+
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "max-failures")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	log, logs := capturingLogger()
+	bouncer.log = log
+	bouncer.updateMaxFailure = cfg.UpdateMaxFailure
+
+	for range 3 {
+		syncStreamCache(bouncer)
+	}
+	if isCrowdsecStreamHealthy {
+		t.Error("stream stayed healthy past updateMaxFailure failures")
+	}
+	// The third failure is the one that trips the threshold, and it is counted
+	// before updateFailure is incremented.
+	if !strings.Contains(logs.String(), "failed 3 times") {
+		t.Errorf("threshold log missing or miscounted, got:\n%s", logs.String())
 	}
 }

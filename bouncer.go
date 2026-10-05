@@ -334,7 +334,7 @@ func New(_ context.Context, next http.Handler, config *configuration.Config, nam
 		lastMetricsPush = time.Now() // Initialize lastMetricsPush when starting the metrics ticker
 		metricsTicker = startTicker("metrics", config.MetricsUpdateIntervalSeconds, log, func() {
 			handleMetricsTicker(bouncer)
-		}, false)
+		}, true)
 	}
 
 	bouncer.log.Debug("New initialized mode:" + config.CrowdsecMode)
@@ -544,11 +544,12 @@ func (bouncer *Bouncer) handleAppsecResponseServeHTTP(rw http.ResponseWriter, re
 }
 
 func handleStreamTicker(bouncer *Bouncer) {
-	if err := handleStreamCache(bouncer); err != nil {
+	queried, err := handleStreamCache(bouncer)
+	if err != nil {
 		// Log only on transitions: a downed LAPI otherwise repeats the same
 		// message on every tick for as long as it stays unreachable.
 		if lapiStreamConnected {
-			bouncer.log.Error("CrowdSec LAPI unreachable; stream cache not updated")
+			bouncer.log.Error("CrowdSec LAPI unreachable; stream cache not updated: " + err.Error())
 			lapiStreamConnected = false
 		}
 		if bouncer.updateMaxFailure != -1 && updateFailure >= bouncer.updateMaxFailure && isCrowdsecStreamHealthy {
@@ -556,14 +557,16 @@ func handleStreamTicker(bouncer *Bouncer) {
 			bouncer.log.Error(fmt.Sprintf("CrowdSec stream sync failed %d times; blocking cache misses", updateFailure+1))
 		}
 		updateFailure++
-	} else {
-		if !lapiStreamConnected {
-			bouncer.log.Info("CrowdSec LAPI connection restored; stream cache refreshed")
-			lapiStreamConnected = true
-		}
-		isCrowdsecStreamHealthy = true
-		updateFailure = 0
+		return
 	}
+	// A peer holding the sync lease means this instance never talked to the
+	// LAPI, so it says nothing about LAPI reachability.
+	if queried && !lapiStreamConnected {
+		bouncer.log.Info("CrowdSec LAPI connection restored; stream cache refreshed")
+		lapiStreamConnected = true
+	}
+	isCrowdsecStreamHealthy = true
+	updateFailure = 0
 }
 
 func handleMetricsTicker(bouncer *Bouncer) {
@@ -577,10 +580,15 @@ func handleMetricsTicker(bouncer *Bouncer) {
 // failing sync cannot kill the ticker or leak a goroutine per tick. When
 // noStartupDelay is set the first run happens immediately instead of after one
 // full interval.
+//
+// stop is unbuffered on purpose: a send only completes once the goroutine has
+// finished any in-flight run and parked in its select, so a sender can use it to
+// know that no further work is coming.
 func startTicker(name string, updateInterval int64, log *slog.Logger, work func(), noStartupDelay bool) chan bool {
 	ticker := time.NewTicker(time.Duration(updateInterval) * time.Second)
-	stop := make(chan bool, 1)
+	stop := make(chan bool)
 	go func() {
+		defer ticker.Stop()
 		defer log.Debug(name + "_ticker:stopped")
 		run := func() {
 			defer func() {
@@ -702,7 +710,10 @@ func getToken(bouncer *Bouncer) error {
 	return fmt.Errorf("getToken statusCode:%d", login.Code)
 }
 
-func handleStreamCache(bouncer *Bouncer) error {
+// handleStreamCache refreshes the decision cache from the LAPI. queried reports
+// whether the LAPI was actually contacted: a cache-hit on the sync lease means
+// a peer refreshed the cache and this instance skipped the round trip entirely.
+func handleStreamCache(bouncer *Bouncer) (bool, error) {
 	// TODO clean properly on exit.
 	// Instead of blocking the goroutine interval for all the secondary node,
 	// if the master service is shut down, other goroutine can take the lead
@@ -711,10 +722,10 @@ func handleStreamCache(bouncer *Bouncer) error {
 	if err == nil {
 		bouncer.log.Debug("handleStreamCache:alreadyUpdated")
 		isCrowdsecStreamStartup = false
-		return nil
+		return false, nil
 	}
 	if err.Error() != cache.CacheMiss {
-		return err
+		return false, err
 	}
 	// To avoid every instance trying to update the cache, set 1 second at least
 	leaseDuration := bouncer.updateInterval - 1
@@ -730,12 +741,12 @@ func handleStreamCache(bouncer *Bouncer) error {
 	}
 	body, err := crowdsecQuery(bouncer, streamRouteURL.String(), nil)
 	if err != nil {
-		return err
+		return true, err
 	}
 	var stream Stream
 	err = json.Unmarshal(body, &stream)
 	if err != nil {
-		return fmt.Errorf("handleStreamCache:parseBody %w", err)
+		return true, fmt.Errorf("handleStreamCache:parseBody %w", err)
 	}
 	for _, decision := range stream.New {
 		duration, err := time.ParseDuration(decision.Duration)
@@ -757,7 +768,7 @@ func handleStreamCache(bouncer *Bouncer) error {
 	}
 	bouncer.log.Debug("handleStreamCache:updated")
 	isCrowdsecStreamStartup = false
-	return nil
+	return true, nil
 }
 
 func isReverseProxyError(statusCode int) bool {

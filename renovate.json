@@ -32,7 +32,7 @@
       "matchStrings": [
         "experimental\\.plugins\\.bouncer\\.version=(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
       ],
-      "depNameTemplate": "maxlerebourg/crowdsec-bouncer-traefik-plugin",
+      "depNameTemplate": "BlackDark/test-crowdsec-bouncer-traefik-plugin",
       "datasourceTemplate": "github-tags"
     },
     {
@@ -42,7 +42,7 @@
       "matchStrings": [
         "version:\\s*\"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\""
       ],
-      "depNameTemplate": "maxlerebourg/crowdsec-bouncer-traefik-plugin",
+      "depNameTemplate": "BlackDark/test-crowdsec-bouncer-traefik-plugin",
       "datasourceTemplate": "github-tags"
     },
     {
