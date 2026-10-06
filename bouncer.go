@@ -544,7 +544,14 @@ func (bouncer *Bouncer) handleAppsecResponseServeHTTP(rw http.ResponseWriter, re
 }
 
 func handleStreamTicker(bouncer *Bouncer) {
-	queried, err := handleStreamCache(bouncer)
+	// While unhealthy the sync lease is bypassed. Health gates banning on every
+	// cache miss and, in stream mode, clean IPs are never cached, so an instance
+	// that cannot clear the flag bans all of its traffic. It can only clear it on
+	// a real LAPI verdict: a lease hit proves another instance claimed the lease,
+	// not that it refreshed anything, and with the default in-memory cache there
+	// are no peers to refresh anything anyway. The cost is one extra LAPI query
+	// per interval while degraded.
+	queried, err := handleStreamCache(bouncer, !isCrowdsecStreamHealthy)
 	if err != nil {
 		// Log only on transitions: a downed LAPI otherwise repeats the same
 		// message on every tick for as long as it stays unreachable.
@@ -559,9 +566,12 @@ func handleStreamTicker(bouncer *Bouncer) {
 		updateFailure++
 		return
 	}
-	// A peer holding the sync lease means this instance never talked to the
-	// LAPI, so it says nothing about LAPI reachability.
-	if queried && !lapiStreamConnected {
+	if !queried {
+		// Healthy, and a peer holds the lease. That says nothing about this
+		// instance's reachability, so leave the health and failure state alone.
+		return
+	}
+	if !lapiStreamConnected {
 		bouncer.log.Info("CrowdSec LAPI connection restored; stream cache refreshed")
 		lapiStreamConnected = true
 	}
@@ -711,28 +721,31 @@ func getToken(bouncer *Bouncer) error {
 }
 
 // handleStreamCache refreshes the decision cache from the LAPI. queried reports
-// whether the LAPI was actually contacted: a cache-hit on the sync lease means
-// a peer refreshed the cache and this instance skipped the round trip entirely.
-func handleStreamCache(bouncer *Bouncer) (bool, error) {
+// whether the LAPI was actually contacted: a cache-hit on the sync lease means a
+// peer refreshed the cache and this instance skipped the round trip entirely.
+// forceQuery skips the lease, so a degraded instance can still reach a verdict.
+func handleStreamCache(bouncer *Bouncer, forceQuery bool) (bool, error) {
 	// TODO clean properly on exit.
 	// Instead of blocking the goroutine interval for all the secondary node,
 	// if the master service is shut down, other goroutine can take the lead
 	// because updated routine information is in the cache
-	_, err := bouncer.cacheClient.Get(cacheTimeoutKey)
-	if err == nil {
-		bouncer.log.Debug("handleStreamCache:alreadyUpdated")
-		isCrowdsecStreamStartup = false
-		return false, nil
+	if !forceQuery {
+		_, err := bouncer.cacheClient.Get(cacheTimeoutKey)
+		if err == nil {
+			bouncer.log.Debug("handleStreamCache:alreadyUpdated")
+			isCrowdsecStreamStartup = false
+			return false, nil
+		}
+		if err.Error() != cache.CacheMiss {
+			return false, err
+		}
+		// To avoid every instance trying to update the cache, set 1 second at least
+		leaseDuration := bouncer.updateInterval - 1
+		if leaseDuration < 1 {
+			leaseDuration = 1
+		}
+		bouncer.cacheClient.Set(cacheTimeoutKey, cache.NoBannedValue, leaseDuration)
 	}
-	if err.Error() != cache.CacheMiss {
-		return false, err
-	}
-	// To avoid every instance trying to update the cache, set 1 second at least
-	leaseDuration := bouncer.updateInterval - 1
-	if leaseDuration < 1 {
-		leaseDuration = 1
-	}
-	bouncer.cacheClient.Set(cacheTimeoutKey, cache.NoBannedValue, leaseDuration)
 	streamRouteURL := url.URL{
 		Scheme:   bouncer.crowdsecScheme,
 		Host:     bouncer.crowdsecHost,

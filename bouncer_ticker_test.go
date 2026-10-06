@@ -207,7 +207,10 @@ func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 	t.Cleanup(lapi.Close)
 
 	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
-
+	// Keep the instance healthy through the failures, so the lease short-circuit
+	// is still the path under test. An unhealthy instance bypasses the lease by
+	// design; see TestHandleStreamTickerQueriesLAPIWhileUnhealthy.
+	cfg.UpdateMaxFailure = -1
 	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "peer-cache")
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -219,7 +222,6 @@ func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 	resetStreamState(t)
 	log, logs := capturingLogger()
 	bouncer.log = log
-	bouncer.cacheClient.Delete(cacheTimeoutKey)
 
 	// Fail once so the LAPI is marked down, then let the next tick hit the lease
 	// left behind by that failed sync. No LAPI request happens on that tick, so
@@ -230,15 +232,94 @@ func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 	if got := requests.Load() - baseline; got != 1 {
 		t.Fatalf("the first tick served %d LAPI requests, want 1", got)
 	}
+	if !isCrowdsecStreamHealthy {
+		t.Fatal("stream went unhealthy with updateMaxFailure=-1")
+	}
 	handleStreamTicker(bouncer)
 	if got := requests.Load() - baseline; got != 1 {
 		t.Fatalf("the sync lease did not short-circuit the second tick: %d LAPI requests, want 1", got)
+	}
+	// A lease hit is not this instance's recovery: it must not clear the
+	// accumulated failure count, or updateMaxFailure would never trip.
+	if updateFailure != 1 {
+		t.Errorf("updateFailure = %d after a peer sync lease, want the pre-existing 1", updateFailure)
+	}
+	if !isCrowdsecStreamHealthy {
+		t.Error("a peer sync lease marked a healthy stream unhealthy")
 	}
 	if !strings.Contains(logs.String(), "CrowdSec LAPI unreachable") {
 		t.Fatalf("LAPI down was not logged, got:\n%s", logs.String())
 	}
 	if strings.Contains(logs.String(), "CrowdSec LAPI connection restored") {
 		t.Errorf("a peer cache refresh was reported as an LAPI recovery:\n%s", logs.String())
+	}
+}
+
+func TestHandleStreamTickerQueriesLAPIWhileUnhealthy(t *testing.T) {
+	resetStreamState(t)
+	var unreachable atomic.Bool
+	unreachable.Store(true)
+	var requests atomic.Int64
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if unreachable.Load() {
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = rw.Write([]byte(`{"new":[],"deleted":[]}`))
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "unhealthy-query")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	log, logs := capturingLogger()
+	bouncer.log = log
+
+	handleStreamTicker(bouncer)
+	if isCrowdsecStreamHealthy {
+		t.Fatal("stream is healthy after a failed sync")
+	}
+
+	// Health gates banning on every cache miss, and in stream mode clean IPs are
+	// never cached, so an instance that cannot clear the flag bans all of its
+	// traffic. It must ignore the lease while unhealthy: a lease hit proves
+	// another instance claimed it, not that anything was refreshed, and with the
+	// default in-memory cache there are no peers at all.
+	// The lease is live here because the tick above ran healthy and claimed it
+	// before failing, so only the bypass can produce another request.
+	if _, err := bouncer.cacheClient.Get(cacheTimeoutKey); err != nil {
+		t.Fatalf("no live sync lease to bypass: %v", err)
+	}
+	baseline := requests.Load()
+	handleStreamTicker(bouncer)
+	if got := requests.Load() - baseline; got != 1 {
+		t.Fatalf("the tick while unhealthy made %d LAPI requests, want 1: the sync lease was not bypassed", got)
+	}
+	if isCrowdsecStreamHealthy {
+		t.Error("health re-armed on a failed sync")
+	}
+	if updateFailure != 2 {
+		t.Errorf("updateFailure = %d after two failed syncs, want 2", updateFailure)
+	}
+
+	unreachable.Store(false)
+	handleStreamTicker(bouncer)
+	if !isCrowdsecStreamHealthy {
+		t.Error("a successful sync did not re-arm stream health")
+	}
+	if updateFailure != 0 {
+		t.Errorf("updateFailure = %d after a successful sync, want 0", updateFailure)
+	}
+	if !strings.Contains(logs.String(), "CrowdSec LAPI connection restored") {
+		t.Errorf("recovery was not logged, got:\n%s", logs.String())
 	}
 }
 
