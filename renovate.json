@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
-  "gitAuthor": "Renovate Bot <22881669+maxlerebourg@users.noreply.github.com>",
+  "gitAuthor": "Renovate Bot <9947112+BlackDark@users.noreply.github.com>",
   "fetchChangeLogs": "off",
   "labels": ["dependencies"],
   "ignorePaths": ["**/vendor/**", "**/node_modules/**"],

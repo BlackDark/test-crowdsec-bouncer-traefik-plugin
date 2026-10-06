@@ -14,7 +14,7 @@ This can be usefull as some browser (Firefox for instance) return a 403 blank we
 ```
 
 The ban file must be present in the Traefik container (bind mounted or added during a custom build).  
-It is not directly accessible from Traefik even when importing the plugin, so [download](https://raw.githubusercontent.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/master/ban.html) it locally to expose it to Traefik.
+It is not directly accessible from Traefik even when importing the plugin, so [download](https://raw.githubusercontent.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/main/ban.html) it locally to expose it to Traefik.
 
 ```yaml 
   ...

@@ -27,7 +27,7 @@ For now 3 captcha providers are supported:
 ```
 
 The captcha HTML file must be present in the Traefik container (bind mounted or added during a custom build).  
-It is not directly accessible from Traefik even when importing the plugin, so [download](https://raw.githubusercontent.com/maxlerebourg/crowdsec-bouncer-traefik-plugin/master/captcha.html) it locally to expose it to Traefik.
+It is not directly accessible from Traefik even when importing the plugin, so [download](https://raw.githubusercontent.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/main/captcha.html) it locally to expose it to Traefik.
 
 ```yaml 
   ...
