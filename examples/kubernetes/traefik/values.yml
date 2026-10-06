@@ -15,4 +15,4 @@ experimental:
   plugins:
     bouncer:
       moduleName: "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin"
-      version: "v1.7.1"
+      version: "v1.7.2"
