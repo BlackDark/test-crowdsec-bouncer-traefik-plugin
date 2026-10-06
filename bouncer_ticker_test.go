@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	cache "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/cache"
 	configuration "github.com/BlackDark/test-crowdsec-bouncer-traefik-plugin/pkg/configuration"
 )
 
@@ -252,6 +253,120 @@ func TestHandleStreamTickerIgnoresPeerCacheRefresh(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "CrowdSec LAPI connection restored") {
 		t.Errorf("a peer cache refresh was reported as an LAPI recovery:\n%s", logs.String())
+	}
+}
+
+func TestHandleStreamTickerRepopulatesCacheAfterRecovery(t *testing.T) {
+	resetStreamState(t)
+	const banned = "203.0.113.9"
+	var unreachable atomic.Bool
+	unreachable.Store(true)
+	var queries []string
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		queries = append(queries, req.URL.RawQuery)
+		if unreachable.Load() {
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = rw.Write([]byte(`{"new":[{"value":"` + banned + `","type":"ban","duration":"10m"}],"deleted":[]}`))
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "recovery")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	bouncer.log, _ = capturingLogger()
+	// pkg/cache is one process-global store, so drop the ban rather than leave a
+	// 10 minute entry that would satisfy the next -count iteration on its own.
+	t.Cleanup(func() { bouncer.cacheClient.Delete(banned) })
+
+	handleStreamTicker(bouncer)
+	if isCrowdsecStreamHealthy {
+		t.Fatal("stream is healthy after a failed sync")
+	}
+
+	unreachable.Store(false)
+	queries = nil
+	// A long-running instance has already sent its one startup query, so the
+	// only thing that can make the recovery query ask for the full set is the
+	// unhealthy term.
+	isCrowdsecStreamStartup = false
+	handleStreamTicker(bouncer)
+	if !isCrowdsecStreamHealthy {
+		t.Fatal("a successful sync did not re-arm stream health")
+	}
+	// Recovery is only half the job: the instance was blocking everything, so the
+	// decisions it missed have to land in the cache it serves from.
+	value, err := bouncer.cacheClient.Get(banned)
+	if err != nil {
+		t.Fatalf("the recovery sync did not write the ban into the cache: %v", err)
+	}
+	if value != cache.BannedValue {
+		t.Errorf("cached value = %q, want %q", value, cache.BannedValue)
+	}
+	// The query ran while unhealthy, so it asked for the full decision set rather
+	// than a delta it would otherwise miss deltas from.
+	if len(queries) != 1 || !strings.Contains(queries[0], "startup=true") {
+		t.Errorf("recovery query = %v, want a single startup=true request", queries)
+	}
+}
+
+func TestHandleStreamTickerLogsBlockThresholdOnce(t *testing.T) {
+	resetStreamState(t)
+	var requests atomic.Int64
+	lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		rw.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(lapi.Close)
+
+	cfg := streamStartupConfig(strings.TrimPrefix(lapi.URL, "http://"), false)
+	// Flip on the first failure. A larger value cannot be reached from a healthy
+	// instance: it would have to win the lease again, and every following tick
+	// finds the lease held, so state the precondition instead of inheriting the
+	// default.
+	cfg.UpdateMaxFailure = 0
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "threshold-log")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	log, logs := capturingLogger()
+	bouncer.log = log
+	// New's own startup sync already hit the LAPI; count only the ticks so the
+	// assertion below cannot be satisfied by fewer failures than it claims.
+	requests.Store(0)
+
+	// Five genuine failures, so the threshold is crossed once and then held. The
+	// isCrowdsecStreamHealthy guard keeps the latch from re-announcing it on
+	// every tick while degraded. Clearing the lease each round keeps all five
+	// on the failure path instead of leaning on the lease TTL.
+	for range 5 {
+		clearStreamLease()
+		handleStreamTicker(bouncer)
+	}
+	if got := requests.Load(); got != 5 {
+		t.Errorf("the LAPI served %d tick requests, want 5, so the assertions below are vacuous", got)
+	}
+	if got := strings.Count(logs.String(), "blocking cache misses"); got != 1 {
+		t.Errorf("the block threshold was logged %d times over 5 failures, want 1:\n%s", got, logs.String())
+	}
+	if got := strings.Count(logs.String(), "CrowdSec LAPI unreachable"); got != 1 {
+		t.Errorf("the LAPI-down transition was logged %d times, want 1:\n%s", got, logs.String())
+	}
+	if isCrowdsecStreamHealthy {
+		t.Error("stream is healthy after five failed syncs")
 	}
 }
 

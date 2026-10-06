@@ -190,22 +190,63 @@ func Test_handleNoStreamCache(t *testing.T) {
 }
 
 func Test_handleStreamCache(t *testing.T) {
-	type args struct {
-		bouncer *Bouncer
+	unreachable := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(unreachable.Close)
+	reachable := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		_, _ = rw.Write([]byte(`{"new":[],"deleted":[]}`))
+	}))
+	t.Cleanup(reachable.Close)
+
+	newBouncer := func(t *testing.T, host string) *Bouncer {
+		t.Helper()
+		resetStreamState(t)
+		cfg := streamStartupConfig(host, false)
+		handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "stream-cache")
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		resetStreamState(t)
+		bouncer, ok := handler.(*Bouncer)
+		if !ok {
+			t.Fatalf("New() returned %T, want *Bouncer", handler)
+		}
+		return bouncer
 	}
+
 	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
+		name       string
+		host       string
+		forceQuery bool
+		leaseHeld  bool
+		wantQuery  bool
+		wantErr    bool
 	}{
-		// TODO: Add test cases.
+		// A peer holding the lease is a skip, not a query, and not an error.
+		{name: "lease held by a peer", host: unreachable.URL, leaseHeld: true, wantQuery: false, wantErr: false},
+		{name: "lease free and LAPI up", host: reachable.URL, wantQuery: true, wantErr: false},
+		{name: "lease free and LAPI down", host: unreachable.URL, wantQuery: true, wantErr: true},
+		// forceQuery skips the lease, so it queries even when one is held. Both
+		// cases need leaseHeld, or they would pass with forceQuery ignored.
+		{name: "forced past a held lease", host: reachable.URL, forceQuery: true, leaseHeld: true, wantQuery: true, wantErr: false},
+		{name: "forced past a held lease with LAPI down", host: unreachable.URL, forceQuery: true, leaseHeld: true, wantQuery: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := handleStreamCache(tt.args.bouncer, false)
+			host := strings.TrimPrefix(tt.host, "http://")
+			bouncer := newBouncer(t, host)
+			// newBouncer's resetStreamState already cleared the lease; re-arm it
+			// only for the cases that model a peer holding it.
+			if tt.leaseHeld {
+				bouncer.cacheClient.Set(cacheTimeoutKey, cache.NoBannedValue, 60)
+			}
+			queried, err := handleStreamCache(bouncer, tt.forceQuery)
+			if queried != tt.wantQuery {
+				t.Errorf("handleStreamCache() queried = %t, want %t", queried, tt.wantQuery)
+			}
 			if (err != nil) != tt.wantErr {
-				t.Errorf("handleStreamCache() error = %v, wantErr %v", err, tt.wantErr)
-				return
+				t.Errorf("handleStreamCache() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
 	}

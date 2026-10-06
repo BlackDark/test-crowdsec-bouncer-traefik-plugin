@@ -9,10 +9,27 @@ import (
 	simpleredis "github.com/maxlerebourg/simpleredis"
 )
 
+// newTestClient returns a client over the shared local store, plus a cleanup
+// dropping the keys the test writes. pkg/cache keeps one process-global TTL map,
+// so tests reusing a key inherit each other's leftovers and pass only on a cold
+// store: under -count=5 Test_Set failed because ttl_map's Set returns early for
+// ttl 0 instead of overwriting, so the 0 second case saw the 10 second value the
+// previous iteration had left behind.
+func newTestClient(t *testing.T, keys ...string) *Client {
+	t.Helper()
+	client := &Client{cache: &localCache{}, log: logger.New("INFO", "")}
+	t.Cleanup(func() {
+		for _, key := range keys {
+			client.Delete(key)
+		}
+	})
+	return client
+}
+
 func Test_Get(t *testing.T) {
 	IPInCache := "10.0.0.10"
 	IPNotInCache := "10.0.0.20"
-	client := &Client{cache: &localCache{}, log: logger.New("INFO", "")}
+	client := newTestClient(t, IPInCache, IPNotInCache)
 	client.Set(IPInCache, BannedValue, 10)
 	type args struct {
 		clientIP string
@@ -48,8 +65,7 @@ func Test_Get(t *testing.T) {
 }
 
 func Test_Set(t *testing.T) {
-	client := &Client{cache: &localCache{}, log: logger.New("INFO", "")}
-	IPInCache := "10.0.0.11"
+	client := newTestClient(t, "10.0.0.11", "10.0.0.12", "10.0.0.13")
 	type args struct {
 		clientIP string
 		value    string
@@ -63,9 +79,16 @@ func Test_Set(t *testing.T) {
 		wantErr  bool
 		valueErr string
 	}{
-		{name: "Set valid IP in local cache for 0 sec", args: args{clientIP: IPInCache, value: BannedValue, duration: 0}, want: "", wantErr: true, valueErr: CacheMiss},
-		{name: "Set valid IP in local cache for 10 sec", args: args{clientIP: IPInCache, value: BannedValue, duration: 10}, want: BannedValue, wantErr: false, valueErr: ""},
-		{name: "Set valid IP in local cache for 10 sec", args: args{clientIP: IPInCache, value: NoBannedValue, duration: 10}, want: NoBannedValue, wantErr: false, valueErr: ""},
+		// A zero duration must not write: ttl_map's Set returns early for ttl 0
+		// rather than overwriting, so reusing one key across the 0 and 10 second
+		// cases would let the previous iteration's 10 second value decide the
+		// 0 second case.
+		{name: "Set valid IP in local cache for 0 sec", args: args{clientIP: "10.0.0.11", value: BannedValue, duration: 0}, want: "", wantErr: true, valueErr: CacheMiss},
+		{name: "Set valid IP in local cache for 10 sec (ban)", args: args{clientIP: "10.0.0.12", value: BannedValue, duration: 10}, want: BannedValue, wantErr: false, valueErr: ""},
+		{name: "Set valid IP in local cache for 10 sec (no ban)", args: args{clientIP: "10.0.0.13", value: NoBannedValue, duration: 10}, want: NoBannedValue, wantErr: false, valueErr: ""},
+		// Overwriting a live key is what a later delta has to do, and what the
+		// shared-key table used to cover by accident.
+		{name: "Overwrite a live ban", args: args{clientIP: "10.0.0.12", value: NoBannedValue, duration: 10}, want: NoBannedValue, wantErr: false, valueErr: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,9 +110,9 @@ func Test_Set(t *testing.T) {
 }
 
 func Test_Delete(t *testing.T) {
-	IPInCache := "10.0.0.12"
-	IPNotInCache := "10.0.0.22"
-	client := &Client{cache: &localCache{}, log: logger.New("INFO", "")}
+	IPInCache := "10.0.0.22"
+	IPNotInCache := "10.0.0.23"
+	client := newTestClient(t, IPInCache, IPNotInCache)
 	client.Set(IPInCache, BannedValue, 10)
 	type args struct {
 		clientIP string
