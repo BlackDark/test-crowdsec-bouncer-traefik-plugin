@@ -2,6 +2,7 @@ package test_crowdsec_bouncer_traefik_plugin //nolint:revive,stylecheck
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"text/template"
 	"time"
@@ -923,6 +925,127 @@ func Test_appsecQuery_unreadableBodyMethods(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatalf("appsecQuery() blocked on an unreadable %s body", tt.method)
 			}
+		})
+	}
+}
+
+// newDurationBouncer builds a bouncer whose stream ticker is already parked, so
+// the caller owns the only sync that can write to the shared cache store. It
+// drops cachedKey on cleanup, because pkg/cache is process-global.
+func newDurationBouncer(t *testing.T, lapiURL, cachedKey string) *Bouncer {
+	t.Helper()
+	resetStreamState(t)
+	cfg := streamStartupConfig(strings.TrimPrefix(lapiURL, "http://"), false)
+	handler, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "durations")
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bouncer, ok := handler.(*Bouncer)
+	if !ok {
+		t.Fatalf("New() returned %T, want *Bouncer", handler)
+	}
+	resetStreamState(t)
+	t.Cleanup(func() { bouncer.cacheClient.Delete(cachedKey) })
+	return bouncer
+}
+
+// Test_handleStreamCacheDecisionDurations pins how a decision's remaining
+// duration is turned into a cache entry. The cache stores whole seconds and its
+// Set treats 0 as "do not write", so an unclamped conversion silently drops a
+// sub-second ban and turns a negative one into a never-expiring entry locally
+// while Redis rejects it.
+// assertDecisionOutcome runs one explicit sync and checks what the decision did
+// to the cache. wantGone covers the negative-duration cases: seeded with a one
+// second verdict, the entry must be left to expire rather than rewritten as
+// never-expiring, which would still read as banned.
+func assertDecisionOutcome(t *testing.T, bouncer *Bouncer, key string, wantCached, wantGone bool, wantValue string) {
+	t.Helper()
+	queried, err := handleStreamCache(bouncer, false)
+	if err != nil {
+		t.Fatalf("handleStreamCache() error = %v", err)
+	}
+	if !queried {
+		t.Fatalf("handleStreamCache() skipped the LAPI, so nothing below is measured")
+	}
+	if wantGone {
+		time.Sleep(1200 * time.Millisecond)
+		if value, getErr := bouncer.cacheClient.Get(key); getErr == nil {
+			t.Fatalf("decision is still cached as %q, want it left to expire", value)
+		}
+		return
+	}
+	value, getErr := bouncer.cacheClient.Get(key)
+	if !wantCached {
+		if getErr == nil {
+			t.Fatalf("decision was cached as %q, want it skipped", value)
+		}
+		return
+	}
+	if getErr != nil {
+		t.Fatalf("cached value not readable: %v", getErr)
+	}
+	if value != wantValue {
+		t.Errorf("cached value = %q, want %q", value, wantValue)
+	}
+}
+
+func Test_handleStreamCacheDecisionDurations(t *testing.T) {
+	const live = "198.51.100.1"
+	tests := []struct {
+		name       string
+		decision   Decision
+		preSeeded  bool
+		wantCached bool
+		wantGone   bool
+		wantValue  string
+	}{
+		{name: "a live ban", decision: Decision{Type: "ban", Value: live, Duration: "10m"}, wantCached: true, wantValue: cache.BannedValue},
+		{name: "a live captcha", decision: Decision{Type: "captcha", Value: live, Duration: "2m"}, wantCached: true, wantValue: cache.CaptchaValue},
+		{name: "a sub-second ban is cached for a second", decision: Decision{Type: "ban", Value: live, Duration: "500ms"}, wantCached: true, wantValue: cache.BannedValue},
+		{name: "a one second ban is cached", decision: Decision{Type: "ban", Value: live, Duration: "1s"}, wantCached: true, wantValue: cache.BannedValue},
+		// Every skipped case is checked against a ban that is already cached.
+		// Caching an empty or never-expiring value instead of leaving it alone
+		// is the failure, and it is invisible if the key starts out empty.
+		{name: "an expired ban leaves an existing verdict", decision: Decision{Type: "ban", Value: live, Duration: "0s"}, preSeeded: true, wantCached: true, wantValue: cache.BannedValue},
+		// A negative duration used to be stored as a never-expiring entry, which
+		// still reads as banned. Seeding with a one second verdict and waiting it
+		// out is what separates "left alone" from "rewritten as permanent".
+		{name: "a negative duration does not pin an existing verdict", decision: Decision{Type: "ban", Value: live, Duration: "-5s"}, preSeeded: true, wantGone: true},
+		{name: "a negative sub-second duration does not pin an existing verdict", decision: Decision{Type: "ban", Value: live, Duration: "-1ns"}, preSeeded: true, wantGone: true},
+		{name: "an unparsable duration leaves an existing verdict", decision: Decision{Type: "ban", Value: live, Duration: "ten minutes"}, preSeeded: true, wantCached: true, wantValue: cache.BannedValue},
+		{name: "an unknown type leaves an existing verdict", decision: Decision{Type: "throttle", Value: live, Duration: "10m"}, preSeeded: true, wantCached: true, wantValue: cache.BannedValue},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetStreamState(t)
+			body, err := json.Marshal(Stream{New: []Decision{tt.decision}})
+			if err != nil {
+				t.Fatalf("marshal stream: %v", err)
+			}
+			// New() runs a stream sync of its own, so the first request gets an
+			// empty stream. Only the explicit handleStreamCache below can then
+			// write the decision, which is what the assertions have to measure.
+			var served atomic.Int64
+			lapi := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+				if served.Add(1) == 1 {
+					_, _ = rw.Write([]byte(`{"new":[],"deleted":[]}`))
+					return
+				}
+				_, _ = rw.Write(body)
+			}))
+			t.Cleanup(lapi.Close)
+
+			bouncer := newDurationBouncer(t, lapi.URL, live)
+			clearStreamLease()
+			bouncer.cacheClient.Delete(live)
+			if tt.preSeeded {
+				ttl := int64(60)
+				if tt.wantGone {
+					ttl = 1
+				}
+				bouncer.cacheClient.Set(live, cache.BannedValue, ttl)
+			}
+			assertDecisionOutcome(t, bouncer, live, tt.wantCached, tt.wantGone, tt.wantValue)
 		})
 	}
 }

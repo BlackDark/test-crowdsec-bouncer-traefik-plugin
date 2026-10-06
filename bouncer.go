@@ -763,18 +763,35 @@ func handleStreamCache(bouncer *Bouncer, forceQuery bool) (bool, error) {
 	}
 	for _, decision := range stream.New {
 		duration, err := time.ParseDuration(decision.Duration)
-		if err == nil {
-			var value string
-			switch decision.Type {
-			case "ban":
-				value = cache.BannedValue
-			case "captcha":
-				value = cache.CaptchaValue
-			default:
-				bouncer.log.Info("handleStreamCache:unknownType " + decision.Type)
-			}
-			bouncer.cacheClient.Set(decision.Value, value, int64(duration.Seconds()))
+		if err != nil {
+			bouncer.log.Warn("handleStreamCache:unparsableDuration value:" + decision.Value + " duration:" + decision.Duration)
+			continue
 		}
+		var value string
+		switch decision.Type {
+		case "ban":
+			value = cache.BannedValue
+		case "captcha":
+			value = cache.CaptchaValue
+		default:
+			bouncer.log.Info("handleStreamCache:unknownType " + decision.Type)
+			continue
+		}
+		// The cache stores whole seconds and its Set treats 0 as "do not write",
+		// so a sub-second decision would silently never be applied, and a
+		// negative one would be stored as a never-expiring entry locally while
+		// Redis rejects it. A decision with nothing left is already over, so skip
+		// it; anything still live is cached for at least a second.
+		seconds := int64(duration.Seconds())
+		if seconds < 1 {
+			if seconds == 0 && duration > 0 {
+				seconds = 1
+			} else {
+				bouncer.log.Debug("handleStreamCache:expiredDecision value:" + decision.Value + " duration:" + decision.Duration)
+				continue
+			}
+		}
+		bouncer.cacheClient.Set(decision.Value, value, seconds)
 	}
 	for _, decision := range stream.Deleted {
 		bouncer.cacheClient.Delete(decision.Value)
